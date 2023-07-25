@@ -1,0 +1,425 @@
+#!/usr/bin/env ruby
+#
+# Run tests to see if the dds functions work against a real mysql
+
+require "bundler"
+require "json"
+
+Bundler.require
+
+require "minitest/autorun"
+require "minitest/spec"
+
+require_relative "../ruby/sketch"
+require_relative "../ruby/mysql"
+
+def query(sql)
+  MySQL.query(sql)
+end
+
+query("drop database if exists dds_test")
+query("create database dds_test")
+query("use dds_test")
+query("create table `sketches` (`grp` int, `sketch` varbinary(32768))")
+
+# Shared tests for mysql functions that require a single sketch argument
+def it_validates_sketch_argument(mysql_function)
+  it "returns null if given null" do
+    results = query("select #{mysql_function}(null) as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "returns null given an invalid sketch" do
+    results = query("select #{mysql_function}('bogus') as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "returns an error if given no arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select #{mysql_function}() as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given more than one argument" do
+    sketch = Sketch.new(vals: [1])
+    err = assert_raises(Mysql2::Error) do
+      query("select #{mysql_function}(unhex('#{sketch.hex}'), unhex('#{sketch.hex}')) as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given a non-string argument" do
+    err = assert_raises(Mysql2::Error) do
+      query("select #{mysql_function}(1) as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+end
+
+describe "dds_inspect" do
+  it_validates_sketch_argument("dds_inspect")
+
+  it "returns human a readable sketch" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100])
+    results = query("select cast(dds_inspect(unhex('#{sketch.hex}')) as char) as res")
+    assert_equal ["res"=>"Sketch<version: 1, sum:121, count:4, gamma:1.0202, bucket_count: 3, buckets:{0: 1, 116: 2, 231: 1, }>"], results.to_a
+  end
+end
+
+describe "dds_sum" do
+  before(:each) do
+    query("truncate sketches")
+  end
+
+  it "returns an error if given the wrong number of arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_sum('garb', 'garb')")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given the wrong number of arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_sum()")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given a non-string argument" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_sum(1)")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns null if given null" do
+    results = query("select dds_sum(null) as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "returns null if given an invalid sketch" do
+    results = query("select dds_sum('bogus') as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "sums sketches together" do
+    sketches = [
+      [ 1, Sketch.new(vals: [1,2,2,3,3,3]) ],
+      [ 1, Sketch.new(vals: [3,4,4,5,5,5]) ],
+      [ 2, Sketch.new(vals: [5,6,6,7,7,7]) ],
+    ]
+
+    sketches.each do |group, sketch|
+      query("insert into sketches (grp, sketch) values (#{group}, unhex('#{sketch.hex}'))")
+    end
+    results = query("select cast(dds_inspect(dds_sum(sketch)) as char) as res from sketches")
+    assert_equal ["res"=>"Sketch<version: 1, sum:78, count:18, gamma:1.0202, bucket_count: 7, buckets:{0: 1, 35: 2, 55: 4, 70: 2, 81: 4, 90: 2, 98: 3, }>"], results.to_a
+
+    sum_sketch = sketches.map{|_,x|x}.inject(&:+)
+    results = query("select dds_sum(sketch) as res from sketches")
+    assert_equal ["res"=>sum_sketch.raw], results.to_a
+  end
+
+  it "works with group bys" do
+    sketches = [
+      [ 1, Sketch.new(vals: [1,2,2,3,3,3]) ],
+      [ 1, Sketch.new(vals: [3,4,4,5,5,5]) ],
+      [ 2, Sketch.new(vals: [5,6,6,7,7,7]) ],
+    ]
+
+    sketches.each do |group, sketch|
+      query("insert into sketches (grp, sketch) values (#{group}, unhex('#{sketch.hex}'))")
+    end
+
+    results = query("select grp, cast(dds_inspect(dds_sum(sketch)) as char) as res from sketches group by grp order by grp")
+
+    expected = [
+      {"grp" => 1, "res" => "Sketch<version: 1, sum:40, count:12, gamma:1.0202, bucket_count: 5, buckets:{0: 1, 35: 2, 55: 4, 70: 2, 81: 3, }>"},
+      {"grp" => 2, "res" => "Sketch<version: 1, sum:38, count:6, gamma:1.0202, bucket_count: 3, buckets:{81: 1, 90: 2, 98: 3, }>"},
+    ]
+
+    assert_equal expected, results.to_a
+
+    sum_sketch_1 = sketches[0][1] + sketches[1][1]
+    results = query("select grp, dds_sum(sketch) as res from sketches group by grp order by grp")
+
+    expected = [
+      {"grp" => 1, "res" => sum_sketch_1.raw},
+      {"grp" => 2, "res" => sketches[2][1].raw},
+    ]
+    assert_equal expected, results.to_a
+  end
+
+  it "deals with null sketches in groups properly" do
+    sketches = [
+      [ 1, Sketch.new(vals: [1]) ],
+      [ 1, Sketch.new(vals: [1]) ],
+      [ 2, Sketch.new(vals: [2]) ],
+      [ 2, Sketch.new(vals: [2]) ],
+    ]
+
+    sketches.each do |group, sketch|
+      query("insert into sketches (grp, sketch) values (#{group}, unhex('#{sketch.hex}'))")
+    end
+
+    query("insert into sketches(grp, sketch) values(2, null)")
+    query("insert into sketches(grp, sketch) values(3, null)")
+    query("insert into sketches(grp, sketch) values(3, null)")
+
+    expected = [
+      {"grp" => 1, "res" => "Sketch<version: 1, sum:2, count:2, gamma:1.0202, bucket_count: 1, buckets:{0: 2, }>"}, # All sketches set
+      {"grp" => 2, "res" => "Sketch<version: 1, sum:4, count:2, gamma:1.0202, bucket_count: 1, buckets:{35: 2, }>"}, # Has 2 sketches 1 null
+      {"grp" => 3, "res" => nil}, # Has only null sketches, so return null
+    ]
+
+    results = query("select grp, cast(dds_inspect(dds_sum(sketch)) as char) as res from sketches group by grp order by grp")
+    assert_equal expected, results.to_a
+
+    expected = [
+      {"grp" => 1, "res" => (sketches[0][1] + sketches[1][1]).raw}, # All sketches set
+      {"grp" => 2, "res" => (sketches[2][1] + sketches[3][1]).raw}, # Has 2 sketches 1 null
+      {"grp" => 3, "res" => nil}, # Has only null sketches, so return null
+    ]
+
+    results = query("select grp, dds_sum(sketch) as res from sketches group by grp order by grp")
+    assert_equal expected, results.to_a
+  end
+end
+
+describe "dds_quantile" do
+  it "returns an error if given other than two arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile()")
+    end
+    assert_match /Requires exactly two arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile(0.99)")
+    end
+    assert_match /Requires exactly two arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile(0.99, 'sketch', 'sketch')")
+    end
+    assert_match /Requires exactly two arguments/, err.message
+  end
+
+  it "returns an error if the first argument isn't a real" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile('a', 'sketch')")
+    end
+    assert_match /First argument must be a numeric quantile/, err.message
+  end
+
+  it "returns an error if the first argument is null" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile(null, 'sketch')")
+    end
+    assert_match /First argument must be a numeric quantile/, err.message
+  end
+
+  it "returns an error if the second argument isn't a string" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_quantile(0.99, 123)")
+    end
+    assert_match /Second argument must be a sketch/, err.message
+  end
+
+  it "returns null if the sketch is null" do
+    results = query("select dds_quantile(0.1, null) as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "returns null if the sketch is invalid" do
+    results = query("select dds_quantile(0.1, 'bogus') as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+
+  it "returns the quantile" do
+    alpha = 0.01
+    sketch = Sketch.new(version: 1, gamma: (1 + alpha) / (1 - alpha), vals: (1..100).to_a)
+
+    relative_error =  alpha + 0.000001
+
+    assert_in_delta 1, query("select dds_quantile(-1, unhex('#{sketch.hex}')) as q").first["q"], (1 * relative_error)
+    assert_in_delta 1, query("select dds_quantile(0, unhex('#{sketch.hex}')) as q").first["q"], (1 * relative_error)
+    assert_in_delta 1, query("select dds_quantile(0.001, unhex('#{sketch.hex}')) as q").first["q"], (1 * relative_error)
+    assert_in_delta 50, query("select dds_quantile(0.50, unhex('#{sketch.hex}')) as q").first["q"], (50 * relative_error)
+    assert_in_delta 99, query("select dds_quantile(0.99, unhex('#{sketch.hex}')) as q").first["q"], (99 * relative_error)
+    assert_in_delta 100, query("select dds_quantile(1, unhex('#{sketch.hex}')) as q").first["q"], (100 * relative_error)
+    assert_in_delta 100, query("select dds_quantile(2, unhex('#{sketch.hex}')) as q").first["q"], (100 * relative_error)
+  end
+end
+
+describe "dds_merge" do
+  it "merges two sketches into a single sketch" do
+    sketch_a = Sketch.new(vals: [1, 10, 10, 100])
+    sketch_b = Sketch.new(vals: [10, 100, 100, 200])
+
+    results = query("select cast(dds_inspect(dds_merge(unhex('#{sketch_a.hex}'), unhex('#{sketch_b.hex}'))) as char) as res")
+    assert_equal ["res"=>"Sketch<version: 1, sum:531, count:8, gamma:1.0202, bucket_count: 4, buckets:{0: 1, 116: 3, 231: 3, 265: 1, }>"], results.to_a
+
+    results = query("select dds_merge(unhex('#{sketch_a.hex}'), unhex('#{sketch_b.hex}')) as res")
+    assert_equal ["res"=>(sketch_a + sketch_b).raw], results.to_a
+  end
+
+  it "returns an error if given other than two arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_merge()")
+    end
+    assert_match /Requires exactly two sketch arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_merge('')")
+    end
+    assert_match /Requires exactly two sketch arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_merge('s', 0)")
+    end
+    assert_match /Requires exactly two sketch arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_merge(0, 's')")
+    end
+    assert_match /Requires exactly two sketch arguments/, err.message
+
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_merge('s', 's', 's')")
+    end
+    assert_match /Requires exactly two sketch arguments/, err.message
+  end
+
+  it "returns the other argument if one argument is null" do
+    sketch = Sketch.new(vals: [1, 10, 100])
+
+    results = query("select cast(dds_inspect(dds_merge(unhex('#{sketch.hex}'), null)) as char) as res")
+    assert_equal ["res"=>"Sketch<version: 1, sum:111, count:3, gamma:1.0202, bucket_count: 3, buckets:{0: 1, 116: 1, 231: 1, }>"], results.to_a
+
+    results = query("select dds_merge(unhex('#{sketch.hex}'), null) as res")
+    assert_equal ["res"=>sketch.raw], results.to_a
+
+    results = query("select cast(dds_inspect(dds_merge(null, unhex('#{sketch.hex}'))) as char) as res")
+    assert_equal ["res"=>"Sketch<version: 1, sum:111, count:3, gamma:1.0202, bucket_count: 3, buckets:{0: 1, 116: 1, 231: 1, }>"], results.to_a
+
+    results = query("select dds_merge(null, unhex('#{sketch.hex}')) as res")
+    assert_equal ["res"=>sketch.raw], results.to_a
+  end
+
+  it "returns null if both arguments are null" do
+    results = query("select dds_merge(null, null) as res")
+    assert_equal ["res"=>nil], results.to_a
+  end
+end
+
+describe "dds_mean" do
+  it_validates_sketch_argument("dds_mean")
+
+  it "returns the mean of the values" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100])
+    results = query("select dds_mean(unhex('#{sketch.hex}')) as res")
+    assert_equal ["res"=> 30.25], results.to_a
+  end
+end
+
+describe "dds_count" do
+  it_validates_sketch_argument("dds_count")
+
+  it "returns the count of the values" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100])
+    results = query("select dds_count(unhex('#{sketch.hex}')) as res")
+    assert_equal ["res"=> 4], results.to_a
+  end
+end
+
+describe "dds_total" do
+  it_validates_sketch_argument("dds_total")
+
+  it "returns the sum (total) of the values" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100.5])
+    results = query("select dds_total(unhex('#{sketch.hex}')) as res")
+    assert_equal ["res"=> 121.5], results.to_a
+  end
+end
+
+describe "dds_json" do
+  it_validates_sketch_argument("dds_json")
+
+  it "returns the sketch as json" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100])
+    results = query("select dds_json(unhex('#{sketch.hex}')) as res")
+
+    expected_json = JSON.generate({
+      "version" => 1,
+      "sum" => 121,
+      "count" => 4,
+      "gamma" => 1.0202,
+      "buckets" => {
+        "0" => 1,
+        "116" => 2,
+        "231" => 1,
+      }
+    })
+
+    assert_equal [{"res" => expected_json}], results.to_a
+  end
+end
+
+describe "dds_invalid" do
+  it "returns 0 if given a valid sketch" do
+    sketch = Sketch.new(vals: [1, 10, 10, 100])
+    results = query("select dds_invalid(unhex('#{sketch.hex}')) as res")
+
+    assert_equal [{"res" => 0}],  results.to_a
+  end
+
+  it "returns 1 if given an invalid sketch" do
+    sketch = Sketch.new(vals: []) # no buckets is invalid
+    results = query("select dds_invalid(unhex('#{sketch.hex}')) as res")
+    assert_equal [{"res" => 1}],  results.to_a
+
+    results = query("select dds_invalid('') as res")
+    assert_equal [{"res" => 1}],  results.to_a
+
+    results = query("select dds_invalid('garb') as res")
+    assert_equal [{"res" => 1}],  results.to_a
+  end
+
+  it "returns null if given a null sketch" do
+    results = query("select dds_invalid(null) as res")
+
+    assert_equal [{"res" => nil}],  results.to_a
+  end
+
+  it "returns an error if given no arguments" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_invalid() as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given more than one argument" do
+    sketch = Sketch.new(vals: [1])
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_invalid(unhex('#{sketch.hex}'), unhex('#{sketch.hex}')) as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+
+  it "returns an error if given a non-string argument" do
+    err = assert_raises(Mysql2::Error) do
+      query("select dds_invalid(1) as res")
+    end
+
+    assert_match /Requires exactly one sketch argument/, err.message
+  end
+end

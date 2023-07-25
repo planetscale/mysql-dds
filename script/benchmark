@@ -1,0 +1,57 @@
+#!/usr/bin/env ruby
+
+require "bundler"
+
+require_relative "../ruby/sketch"
+require_relative "../ruby/mysql"
+
+SKETCHES = 1_000_000
+VALS_PER_SKETCH = 50
+VAL_RANGE = (1..1_000_000)
+
+def query(sql)
+  MySQL.query(sql)
+end
+
+def time(name)
+  start = Time.now
+  yield
+  elapsed = Time.now - start
+  puts "#{elapsed.round(3)}s: #{name}"
+end
+
+begin
+  sketches_present = query("select count(1) c from dds_test.sketches").first["c"] == SKETCHES rescue nil
+end
+
+if sketches_present
+  puts "#{SKETCHES} sketches present, skipping insert"
+else
+  query("drop database if exists dds_test")
+  query("create database dds_test")
+  query("use dds_test")
+  query("create table `sketches` (`grp` int, `sketch` varbinary(32768))")
+
+  puts "Inserting #{SKETCHES} sketch rows"
+  (SKETCHES / 1000).times do |group|
+    sketches = 1000.times.map { Sketch.new( vals: VALS_PER_SKETCH.times.map { rand(VAL_RANGE) })}
+    query("insert into sketches (grp, sketch) values " + sketches.map { |s| "(#{group},unhex('#{s.hex}'))" }.join(","))
+  end
+end
+
+query("use dds_test")
+
+benchmarks = [
+  "select sum(length(sketch)) from sketches",
+  "select dds_quantile(0.99,dds_sum(sketch)) from sketches",
+  "select sum(length(sketch)) from sketches group by grp",
+  "select dds_quantile(0.99, dds_sum(sketch)) from sketches group by grp",
+  "select avg(dds_quantile(0.99, sketch)) from sketches",
+]
+
+benchmarks.each do |query|
+  time(query) { query(query) }
+end
+
+average_size = query("select avg(length(sketch)) as average_size from sketches").first["average_size"]
+puts "Average size of sketch #{'%.2f' % average_size }B"

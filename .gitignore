@@ -1,0 +1,4 @@
+/tmp/build/*
+/tmp/download/*
+/tmp/test/*
+/cmake-build-debug

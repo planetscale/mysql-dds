@@ -1,0 +1,20 @@
+set sql_log_bin = 0;
+drop function if exists dds_inspect;
+drop function if exists dds_sum;
+drop function if exists dds_quantile;
+drop function if exists dds_merge;
+drop function if exists dds_mean;
+drop function if exists dds_count;
+drop function if exists dds_total;
+drop function if exists dds_json;
+drop function if exists dds_invalid;
+
+create function dds_inspect returns string soname 'dds.so';
+create function dds_quantile returns real soname 'dds.so';
+create aggregate function dds_sum returns string soname 'dds.so';
+create function dds_merge returns string soname 'dds.so';
+create function dds_mean returns real soname 'dds.so';
+create function dds_count returns integer soname 'dds.so';
+create function dds_total returns real soname 'dds.so';
+create function dds_json returns string soname 'dds.so';
+create function dds_invalid returns integer soname 'dds.so';

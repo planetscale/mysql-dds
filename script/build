@@ -1,0 +1,21 @@
+#!/bin/bash
+#
+# Builds dds.so
+
+set -e
+
+if [ $(uname) = Darwin ]; then
+  SOFILE=dylib
+  JOBS=$(sysctl -n hw.physicalcpu)
+else
+  SOFILE=so
+  JOBS=$(nproc)
+fi
+
+set -e
+cd "$(dirname "$0")/.."
+
+cmake . -B tmp/build
+cd "tmp/build"
+make -j$JOBS
+cp libmysql-dds.$SOFILE dds.so

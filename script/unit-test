@@ -1,0 +1,11 @@
+#!/bin/bash
+#
+# Build and run the c++ test suite
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+script/build
+cd tmp/build
+ctest --rerun-failed --output-on-failure

@@ -1,0 +1,32 @@
+#!/bin/bash
+#
+# Make a release tarball
+
+set -e
+
+if [ $(uname) = Darwin ]; then
+  >&2 echo "Can't release on mac"
+  exit 1;
+fi
+
+cd "$(dirname "$0")/.."
+
+DISTRO=$(lsb_release --id -s | tr "[:upper:]" "[:lower:]") # e.g. debian
+CODENAME=$(lsb_release --codename -s) # e.g. bullseye
+ARCH=$(uname -m) # e.g. x86_64
+VERSION="0.1.0"
+DATE=$(date +"%Y%m%d")
+SHORT_COMMIT=$(echo ${COMMIT:?} | cut -c -7)
+
+RELEASE_NAME=mysql-dds-${VERSION:?}.${DATE:?}-${SHORT_COMMIT:?}-mysql-${MYSQL_VERSION:?}-${CODENAME:?}-linux-${ARCH:?}
+
+mkdir -p tmp/dist/$RELEASE_NAME
+cp tmp/build/dds.so tmp/dist/$RELEASE_NAME/
+cp install-dds.sql tmp/dist/$RELEASE_NAME/
+
+cd tmp/dist
+tar -czv --owner=root --group=root -f $RELEASE_NAME.tgz $RELEASE_NAME
+cd ../..
+
+echo 'mysqlpass' | sudo -S cp tmp/dist/$RELEASE_NAME.tgz  dist/
+echo "Created $RELEASE_NAME.tgz for release"

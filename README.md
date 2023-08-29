@@ -37,3 +37,53 @@ Sketches are stored in MySQL in binary columns with the following format.
 * `dds_invalid(string: sketch) -> real: error` - Returns 1 if the input sketch is invalid, 0 otherwise.
 * `dds_json(string: sketch) -> string: json` - Returns the sketch, including the buckets, as JSON.
 * `dds_inspect(string: sketch) -> string: inspected` - Shows the sketch in a human readable format. You should probably use `dds_json` instead.
+
+## Development
+
+Requires `cmake` (on MacOS: `brew install cmake`).
+
+Running C++ unit tests:
+
+```shell
+script/build && script/unit-test
+```
+
+Installing locally:
+
+```shell
+script/build && script/install
+```
+
+Following this you should see the functions available locally:
+
+```
+mysql> select * from mysql.func;
++---------------+-----+--------+-----------+
+| name          | ret | dl     | type      |
++---------------+-----+--------+-----------+
+| dds_count     |   2 | dds.so | function  |
+| dds_inspect   |   0 | dds.so | function  |
+| dds_invalid   |   2 | dds.so | function  |
+| dds_json      |   0 | dds.so | function  |
+| dds_mean      |   1 | dds.so | function  |
+| dds_merge     |   0 | dds.so | function  |
+| dds_quantile  |   1 | dds.so | function  |
+| dds_sum       |   0 | dds.so | aggregate |
+| dds_total     |   1 | dds.so | function  |
++---------------+-----+--------+-----------+
+```
+
+
+Running integration test locally:
+
+```shell
+script/build && script/install && script/integration-test
+```
+
+Running benchmarks locally:
+
+```shell
+script/build && script/install && script/benchmark
+```
+
+

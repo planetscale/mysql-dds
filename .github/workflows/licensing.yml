@@ -22,5 +22,7 @@ jobs:
         with:
           ruby-version: 3.2.2
           bundler-cache: false
+      - run: rm Gemfile
+      - run: rm Gemfile.lock
       - run: gem install license_finder
       - run: license_finder
